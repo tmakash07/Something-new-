@@ -1,4 +1,4 @@
-import { DifficultyLevel, LanguageOption } from "../types";
+import { DifficultyLevel, LanguageOption, GeneratedQuizItem } from "../types";
 
 export interface AdminSettingsRow {
   admin_id: number;
@@ -19,7 +19,6 @@ export class DatabaseService {
 
     if (result) return result;
 
-    // Create default settings if not exists
     const defaultSettings: AdminSettingsRow = {
       admin_id: adminId,
       target_channel_id: null,
@@ -68,5 +67,98 @@ export class DatabaseService {
       .all<{ channel_id: string; title: string }>();
     return result.results || [];
   }
+
+  /**
+   * Saves generated questions to quiz_bank and queues them for target channel
+   */
+  async saveAndQueueQuestions(
+    targetChannelId: string,
+    questions: Array<GeneratedQuizItem & { hash: string }>
+  ): Promise<{ inserted: number; duplicates: number }> {
+    let inserted = 0;
+    let duplicates = 0;
+
+    for (const q of questions) {
+      try {
+        // Insert into quiz_bank (ignore if duplicate hash exists)
+        const bankStmt = await this.db
+          .prepare(
+            `INSERT INTO quiz_bank (question_hash, question_text, option_a, option_b, option_c, option_d, correct_option_index, explanation, topic, difficulty, language, source_reference)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(question_hash) DO NOTHING
+             RETURNING id`
+          )
+          .bind(
+            q.hash,
+            q.question,
+            q.options[0],
+            q.options[1],
+            q.options[2],
+            q.options[3],
+            q.correct_option_index,
+            q.explanation,
+            q.topic || "General",
+            q.difficulty || "medium",
+            "bangla",
+            q.source_reference || null
+          )
+          .first<{ id: number }>();
+
+        let questionId: number | undefined = bankStmt?.id;
+
+        if (!questionId) {
+          // Question already exists in master bank
+          const existing = await this.db
+            .prepare(`SELECT id FROM quiz_bank WHERE question_hash = ?`)
+            .bind(q.hash)
+            .first<{ id: number }>();
+          questionId = existing?.id;
+          duplicates++;
+        } else {
+          inserted++;
+        }
+
+        // Add to active dispatch queue if a question ID was resolved
+        if (questionId) {
+          await this.db
+            .prepare(
+              `INSERT INTO quiz_queue (channel_id, question_id, status)
+               VALUES (?, ?, 'pending')`
+            )
+            .bind(targetChannelId, questionId)
+            .run();
+        }
+      } catch (err) {
+        console.error("Failed to insert question:", err);
       }
-  
+    }
+
+    return { inserted, duplicates };
+  }
+
+  async getQueueStats(channelId?: string): Promise<{ pending: number; sent: number }> {
+    const filter = channelId ? `WHERE channel_id = '${channelId}'` : "";
+    const pending = await this.db
+      .prepare(`SELECT COUNT(*) as count FROM quiz_queue WHERE status = 'pending' ${channelId ? `AND channel_id = ?` : ""}`)
+      .bind(...(channelId ? [channelId] : []))
+      .first<{ count: number }>();
+
+    const sent = await this.db
+      .prepare(`SELECT COUNT(*) as count FROM quiz_queue WHERE status = 'sent' ${channelId ? `AND channel_id = ?` : ""}`)
+      .bind(...(channelId ? [channelId] : []))
+      .first<{ count: number }>();
+
+    return {
+      pending: pending?.count || 0,
+      sent: sent?.count || 0,
+    };
+  }
+
+  async clearQueue(channelId?: string): Promise<void> {
+    if (channelId) {
+      await this.db.prepare(`DELETE FROM quiz_queue WHERE channel_id = ? AND status = 'pending'`).bind(channelId).run();
+    } else {
+      await this.db.prepare(`DELETE FROM quiz_queue WHERE status = 'pending'`).run();
+    }
+  }
+                            }
