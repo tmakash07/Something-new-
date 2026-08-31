@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "quiz_bot_db"
-database_id = "YOUR_D1_DATABASE_ID" # We will replace this when created
+database_id = "80fb6ef5-823d-4512-ba09-969db84d9d15" # We will replace this when created
 
 # Cloudflare Scheduled Cron (Runs every 1 minute for the queue engine)
 [triggers]
